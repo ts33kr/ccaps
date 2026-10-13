@@ -363,6 +363,12 @@ Each line shows the time, the layouts, the outcome with its reason, how long the
 
 ## Troubleshooting
 
+### CCaps stops unexpectedly
+
+Lifecycle diagnostics are saved in `%LOCALAPPDATA%\CCaps\lifecycle.log`, with one rotated previous log after approximately 1 MiB. They record startup, readiness, explicit stop requests, session-end messages, message-loop errors, and Rust panics. They do not record keys, typed text, or window titles, and use no polling timer. If CCaps exits without a final log entry, termination may have occurred outside its normal exit handling; the log alone cannot identify the source of an external termination.
+
+Cancelled Windows shutdown or sign-out requests no longer stop CCaps: it stays active after `WM_QUERYENDSESSION` and only exits after a confirmed `WM_ENDSESSION`.
+
 ### Caps Lock toggles Caps Lock in some windows
 The window is probably running as administrator; see [Known Limitations](#known-limitations).
 
