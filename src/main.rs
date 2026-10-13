@@ -6,6 +6,7 @@ mod keyboard_hook;
 mod layout_indicator;
 mod layout_manager;
 mod layout_switcher;
+mod lifecycle_log;
 
 use cli::{create_mutex, execute_command, parse_args, should_run_in_background, CliCommand};
 use interactive_menu::show_interactive_menu;
@@ -27,6 +28,9 @@ use winapi::um::winuser::*;
 static MUTEX_HANDLE: AtomicPtr<winapi::ctypes::c_void> = AtomicPtr::new(ptr::null_mut());
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        lifecycle_log::event(&format!("panic: {info}"))
+    }));
     // Keep fullscreen client and monitor bounds in physical pixels on scaled displays.
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -110,6 +114,9 @@ fn run_main_loop(country_codes: Vec<String>) {
     // Create mutex to prevent multiple instances
     let mutex = create_mutex();
     if mutex.is_null() {
+        lifecycle_log::event(&format!("startup failed: mutex error {}", unsafe {
+            GetLastError()
+        }));
         eprintln!("Failed to create mutex");
         return;
     }
@@ -129,6 +136,10 @@ fn run_main_loop(country_codes: Vec<String>) {
     }
 
     let is_background = should_run_in_background();
+    lifecycle_log::event(&format!(
+        "starting version={} background={is_background}",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     if is_background {
         // Detaching from the parent process in the background
@@ -159,6 +170,7 @@ fn run_main_loop(country_codes: Vec<String>) {
                 }
             }
             Err(e) => {
+                lifecycle_log::event(&format!("startup failed: keyboard hook: {e}"));
                 if !is_background {
                     eprintln!("Hook installation error: {}", e);
                 }
@@ -184,7 +196,15 @@ fn run_main_loop(country_codes: Vec<String>) {
         layout_switcher::start(GetCurrentThreadId(), config.win_space_fallback);
 
         // Create hidden window for message handling
-        create_message_window();
+        if create_message_window().is_null() {
+            lifecycle_log::event(&format!(
+                "startup failed: message window error {}",
+                GetLastError()
+            ));
+            cleanup_and_exit();
+            std::process::exit(1);
+        }
+        lifecycle_log::event("ready: keyboard hook and message loop installed");
 
         // Keep Scroll Lock in step with the foreground window's layout (timer on this thread)
         layout_indicator::start_indicator_sync();
@@ -193,7 +213,16 @@ fn run_main_loop(country_codes: Vec<String>) {
         let mut msg: MSG = mem::zeroed();
         loop {
             let result = GetMessageW(&mut msg, ptr::null_mut(), 0, 0);
-            if result == 0 || result == -1 {
+            if result == -1 {
+                lifecycle_log::event(&format!(
+                    "message loop failed: Windows error {}",
+                    GetLastError()
+                ));
+                cleanup_and_exit();
+                std::process::exit(1);
+            }
+            if result == 0 {
+                lifecycle_log::event(&format!("message loop ended: WM_QUIT code={}", msg.wParam));
                 break;
             }
 
@@ -209,7 +238,8 @@ fn run_main_loop(country_codes: Vec<String>) {
             }
 
             // Handle other system messages
-            if msg.message == WM_QUERYENDSESSION || msg.message == WM_ENDSESSION {
+            if session_end_confirmed(msg.message, msg.wParam) {
+                lifecycle_log::event("session ended: confirmed by Windows");
                 // System shutdown - cleanup and exit gracefully
                 break;
             }
@@ -260,7 +290,7 @@ fn cleanup_and_exit() {
 }
 
 // Improved hidden window creation function
-unsafe fn create_message_window() {
+unsafe fn create_message_window() -> HWND {
     use winapi::um::libloaderapi::GetModuleHandleW;
 
     let class_name = "CCapsMessageWindow\0";
@@ -277,12 +307,22 @@ unsafe fn create_message_window() {
         lparam: LPARAM,
     ) -> LRESULT {
         match msg {
-            WM_QUERYENDSESSION | WM_ENDSESSION => {
-                // System shutdown - cleanup and exit gracefully
-                PostQuitMessage(0);
+            WM_QUERYENDSESSION => {
+                // This is only a question. A later WM_ENDSESSION may cancel shutdown.
+                lifecycle_log::event("session end requested: remaining active until confirmed");
+                1
+            }
+            WM_ENDSESSION => {
+                if session_end_confirmed(msg, wparam) {
+                    lifecycle_log::event("session end confirmed: requesting exit");
+                    PostQuitMessage(0);
+                } else {
+                    lifecycle_log::event("session end cancelled: remaining active");
+                }
                 0
             }
             WM_DESTROY => {
+                lifecycle_log::event("message window destroyed: requesting exit");
                 PostQuitMessage(0);
                 0
             }
@@ -337,6 +377,25 @@ unsafe fn create_message_window() {
             ptr::null_mut(),
             GetModuleHandleW(ptr::null()),
             ptr::null_mut(),
-        );
+        )
+    } else {
+        hwnd
+    }
+}
+
+fn session_end_confirmed(message: u32, session_ending: usize) -> bool {
+    message == WM_ENDSESSION && session_ending != 0
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn session_query_and_cancel_do_not_request_exit() {
+        assert!(!session_end_confirmed(WM_QUERYENDSESSION, 1));
+        assert!(!session_end_confirmed(WM_ENDSESSION, 0));
+        assert!(session_end_confirmed(WM_ENDSESSION, 1));
+        assert!(!session_end_confirmed(WM_CLOSE, 1));
     }
 }
