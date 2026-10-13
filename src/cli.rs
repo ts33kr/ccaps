@@ -833,6 +833,7 @@ fn stop_background_process() -> bool {
         return false;
     }
     unsafe {
+        crate::lifecycle_log::event("stop requested by CLI");
         PostMessageA(window, WM_QUIT, 0, 0);
     }
     true
