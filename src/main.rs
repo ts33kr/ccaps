@@ -398,4 +398,21 @@ mod lifecycle_tests {
         assert!(session_end_confirmed(WM_ENDSESSION, 1));
         assert!(!session_end_confirmed(WM_CLOSE, 1));
     }
+
+    #[test]
+    fn cancelled_session_request_keeps_message_window_alive() {
+        unsafe {
+            let window = create_message_window();
+            assert!(!window.is_null());
+            assert_eq!(SendMessageW(window, WM_QUERYENDSESSION, 1, 0), 1);
+            SendMessageW(window, WM_ENDSESSION, 0, 0);
+            let mut msg: MSG = mem::zeroed();
+            let quit = PeekMessageW(&mut msg, ptr::null_mut(), WM_QUIT, WM_QUIT, PM_REMOVE);
+            assert_eq!(quit, 0, "cancelled session must not post WM_QUIT");
+            assert_ne!(IsWindow(window), 0);
+            DestroyWindow(window);
+            // Discard the normal teardown quit message on this test thread.
+            PeekMessageW(&mut msg, ptr::null_mut(), WM_QUIT, WM_QUIT, PM_REMOVE);
+        }
+    }
 }
